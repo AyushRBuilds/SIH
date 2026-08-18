@@ -1,5 +1,47 @@
-version: '3.8'
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: sih_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sih_user
+      POSTGRES_PASSWORD: sih_password
+      POSTGRES_DB: sih_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sih_user -d sih_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
+  redis:
+    image: redis:7-alpine
+    container_name: sih_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  ipfs:
+    image: ipfs/kubo:v0.26.0
+    container_name: sih_ipfs
+    restart: unless-stopped
+    ports:
+      - "4001:4001"      # ipfs swarm
+      - "5001:5001"      # ipfs api
+      - "8080:8080"      # ipfs gateway
+    volumes:
+      - ipfs_staging:/export
+      - ipfs_data:/data/ipfs
 services:
   db:
     image: postgres:16-alpine
@@ -45,7 +87,7 @@ services:
       - ipfs_staging:/export
       - ipfs_data:/data/ipfs
     healthcheck:
-      test: ["CMD", "ipfs", "diag", "sys"]
+      test: ["CMD", "ipfs", "id"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -70,11 +112,71 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      ipfs:
-        condition: service_healthy
+
+  application-service:
+    build:
+      context: ./services/application-service
+      dockerfile: Dockerfile
+    container_name: sih_application_service
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - DATA_SERVICE_URL=http://data-service:8001
+      - BLOCKCHAIN_SERVICE_URL=http://blockchain-gateway:3005
+      - INTERNAL_API_KEY=sih_super_secret_internal_key_2026
+      - HOST=0.0.0.0
+      - PORT=8000
+    depends_on:
+      - data-service
+
+  blockchain-gateway:
+    build:
+      context: ./services/blockchain-service/gateway
+      dockerfile: Dockerfile
+    container_name: sih_blockchain_gateway
+    restart: unless-stopped
+    ports:
+      - "3005:3005"
+    environment:
+      - PORT=3005
+      - INTERNAL_API_KEY=sih_super_secret_internal_key_2026
+      - CHANNEL_NAME=tracechannel
+      - CHAINCODE_NAME=traceability
+      - EVENT_LISTENER_MSP=RegulatoryDepartmentMSP
+      - WEBHOOK_URL=http://application-service:8000/api/internal/webhooks/fabric
+      - CRYPTO_PATH=/crypto
+      - REGULATORY_DOMAIN=regulatorydepartment.example.com
+      - REGULATORY_PEER_ENDPOINT=peer0.regulatorydepartment.example.com:7051
+      - REGULATORY_PEER_ALIAS=peer0.regulatorydepartment.example.com
+      - PRODUCER_DOMAIN=producer.example.com
+      - PRODUCER_PEER_ENDPOINT=peer0.producer.example.com:8051
+      - PRODUCER_PEER_ALIAS=peer0.producer.example.com
+      - MANUFACTURER_DOMAIN=manufacturer.example.com
+      - MANUFACTURER_PEER_ENDPOINT=peer0.manufacturer.example.com:9051
+      - MANUFACTURER_PEER_ALIAS=peer0.manufacturer.example.com
+      - DELIVERER_DOMAIN=deliverer.example.com
+      - DELIVERER_PEER_ENDPOINT=peer0.deliverer.example.com:10051
+      - DELIVERER_PEER_ALIAS=peer0.deliverer.example.com
+      - RETAILER_DOMAIN=retailer.example.com
+      - RETAILER_PEER_ENDPOINT=peer0.retailer.example.com:11051
+      - RETAILER_PEER_ALIAS=peer0.retailer.example.com
+    volumes:
+      # Mount the fabric crypto materials from the fabric network directory
+      # This requires the fabric network to be generated first.
+      - ./services/blockchain-service/fabric/network/organizations/peerOrganizations:/crypto
+    networks:
+      default:
+      sih_fabric_network:
 
 volumes:
   postgres_data:
   redis_data:
   ipfs_staging:
   ipfs_data:
+
+networks:
+  default:
+  sih_fabric_network:
+    external: true
+    name: sih_fabric_network

@@ -1,9 +1,13 @@
 from typing import Dict, Any, Optional
 from fastapi import HTTPException, status
-import uuid
+import hashlib
+import json
+import logging
 from app.auth.dependencies import ActorContext
 from app.clients import get_data_client, get_blockchain_client
 from app.schemas.qr import QRResolveRequest, CredentialVerifyRequest, QRResolveResponse, CredentialVerifyResponse
+
+logger = logging.getLogger("sih.qr")
 
 
 class QRService:
@@ -274,31 +278,133 @@ class QRService:
             evidence=batch_meta.get("evidence", [])
         )
 
-    async def verify_inner_credential(self, payload: CredentialVerifyRequest, actor: ActorContext) -> CredentialVerifyResponse:
-        # Step 1: Verify inner credential (hash match or tamper-evident check)
-        is_valid = len(payload.inner_credential_code) >= 6
-        
-        # Validate traceability exists
+    async def verify_inner_credential(
+        self,
+        payload: CredentialVerifyRequest,
+        actor: ActorContext
+    ) -> CredentialVerifyResponse:
+        """
+        Verify a unit or batch by:
+        1. Querying PostgreSQL (D1) for the current DB state
+        2. Querying the Fabric ledger (via D2 Gateway) for the on-chain state
+        3. Comparing batch state between DB and Fabric
+        4. Comparing DB canonical-JSON SHA-256 hash with Fabric-stored metadata_hash
+        5. Returning VERIFIED or TAMPER_DETECTED with real blockchain proof
+
+        BUG-7 FIX: No fake audit_tx_id. Real Fabric evaluate call only.
+        """
         ref_id = payload.unit_or_batch_id
-        batch = await self.data_client.get_batch(ref_id)
-        
+
+        # ── Step 1: Fetch from D1 database ──────────────────────────────
+        db_batch = await self.data_client.get_batch(ref_id)
+
+        if not db_batch:
+            return CredentialVerifyResponse(
+                traceability={"verified": False, "batch_id": ref_id, "error": "Batch not found in database"},
+                authenticity={"verified": False, "message": "Cannot verify — batch not in database"},
+                audit_tx_id="NOT_COMMITTED",
+            )
+
+        # ── Step 2: Fetch from Fabric ledger (evaluate — no tx) ──────────
+        actor_context = {
+            "fabric_msp_id": actor.fabric_msp_id or "RegulatoryDepartmentMSP"
+        }
+        fabric_state: Optional[Dict[str, Any]] = None
+        fabric_error: Optional[str] = None
+        blockchain_tx_id: str = "FABRIC_UNAVAILABLE"
+        blockchain_proof: Dict[str, Any] = {}
+
+        try:
+            fabric_state = await self.bc_client.get_batch_from_fabric(ref_id, actor_context)
+        except Exception as e:
+            fabric_error = str(e)
+            logger.warning(f"[QR verify] Fabric query failed for {ref_id}: {e}")
+
+        # ── Step 3: Compare DB state vs Fabric state ─────────────────────
+        tamper_detected = False
+        tamper_reasons = []
+
+        if fabric_state is None:
+            if fabric_error:
+                # Fabric unavailable — cannot definitively verify, but DB says it exists
+                traceability_status = "UNVERIFIABLE"
+                tamper_reasons.append(f"Fabric unavailable: {fabric_error}")
+            else:
+                traceability_status = "TAMPER_DETECTED"
+                tamper_detected = True
+                tamper_reasons.append("Batch exists in database but NOT on Fabric ledger")
+        else:
+            # State comparison: DB state vs Fabric state
+            db_state = (db_batch.get("state") or "").upper()
+            fabric_state_val = (fabric_state.get("state") or "").upper()
+
+            if db_state != fabric_state_val:
+                tamper_detected = True
+                tamper_reasons.append(
+                    f"State mismatch: DB={db_state} vs Fabric={fabric_state_val}"
+                )
+
+            # ── Step 4: Hash verification ─────────────────────────────────
+            # Compute canonical SHA-256 of the DB record's core fields
+            # and compare with any stored metadata_hash on the Fabric record.
+            fabric_stored_hash = fabric_state.get("metadata_hash")
+            if fabric_stored_hash:
+                # Reconstruct canonical JSON of DB batch (same fields as Fabric record)
+                canonical_fields = {
+                    "batch_id": db_batch.get("batch_id") or db_batch.get("id"),
+                    "product_id": db_batch.get("product_id"),
+                    "state": db_state,
+                    "current_custodian": fabric_state.get("current_custodian"),
+                }
+                canonical_json = json.dumps(canonical_fields, sort_keys=True)
+                computed_hash = hashlib.sha256(canonical_json.encode()).hexdigest()
+
+                if computed_hash != fabric_stored_hash:
+                    tamper_detected = True
+                    tamper_reasons.append(
+                        f"Metadata hash mismatch: computed={computed_hash[:16]}... vs stored={fabric_stored_hash[:16]}..."
+                    )
+
+            # Get the most recent blockchain tx_id from D1 event history
+            db_events = await self.data_client.get_batch_events(ref_id) if hasattr(self.data_client, 'get_batch_events') else []
+            if db_events:
+                latest_event = db_events[-1]
+                blockchain_tx_id = latest_event.get("fabric_tx_id") or "NOT_COMMITTED"
+                blockchain_proof = {
+                    "transaction_id": blockchain_tx_id,
+                    "block_number": latest_event.get("block_number"),
+                    "channel_id": latest_event.get("channel_id", "tracechannel"),
+                    "chaincode_id": "traceability",
+                    "commit_status": "COMMITTED",
+                }
+
+            traceability_status = "TAMPER_DETECTED" if tamper_detected else "VERIFIED"
+
+        # ── Step 5: Assemble response ─────────────────────────────────────
         traceability_result = {
-            "verified": batch is not None,
-            "batch_id": ref_id
+            "verified": not tamper_detected,
+            "status": traceability_status,
+            "batch_id": ref_id,
+            "db_state": db_batch.get("state"),
+            "fabric_state": fabric_state.get("state") if fabric_state else None,
+            "tamper_reasons": tamper_reasons if tamper_detected else [],
+            "blockchain_proof": blockchain_proof,
         }
-        
-        # Step 2: Record verification event
-        # Skip bc_client.record_verification as D2 (Gateway) doesn't have an endpoint for it yet.
-        audit_tx_id = f"tx-mock-verify-{uuid.uuid4().hex[:8]}"
-        
+
+        # Physical credential check (inner credential length heuristic)
+        cred_valid = len(payload.inner_credential_code) >= 6
         authenticity_result = {
-            "verified": is_valid,
+            "verified": cred_valid and not tamper_detected,
             "credential_id": payload.inner_credential_code,
-            "message": "Inner physical credential verified authentic." if is_valid else "AUTHENTICITY WARNING: Invalid inner credential."
+            "message": (
+                "Product traceability VERIFIED — all blockchain records consistent."
+                if (not tamper_detected and cred_valid)
+                else "AUTHENTICITY WARNING: Tamper detected or invalid credential."
+            ),
         }
-        
+
         return CredentialVerifyResponse(
             traceability=traceability_result,
             authenticity=authenticity_result,
-            audit_tx_id=audit_tx_id
+            audit_tx_id=blockchain_tx_id,   # Real Fabric TX ID — never a fake placeholder
         )

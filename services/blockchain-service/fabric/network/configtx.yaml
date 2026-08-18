@@ -1,0 +1,237 @@
+# ============================================================
+# SIH 2026 Food Traceability — Channel and Genesis Block Config
+# Fabric Version: 2.5 LTS
+# ============================================================
+# configtx.yaml
+# Used by:
+#   configtxgen -profile SIHGenesis -channelID system-channel -outputBlock ./channel-artifacts/genesis.block
+#   configtxgen -profile TraceChannel -outputCreateChannelTx ./channel-artifacts/tracechannel.tx -channelID tracechannel
+# ============================================================
+
+---
+Organizations:
+  - &OrdererOrg
+    Name: OrdererOrg
+    ID: OrdererMSP
+    MSPDir: ./organizations/ordererOrganizations/example.com/msp
+    Policies:
+      Readers:
+        Type: Signature
+        Rule: "OR('OrdererMSP.member')"
+      Writers:
+        Type: Signature
+        Rule: "OR('OrdererMSP.member')"
+      Admins:
+        Type: Signature
+        Rule: "OR('OrdererMSP.admin')"
+    OrdererEndpoints:
+      - orderer.example.com:7050
+
+  - &RegulatoryDepartment
+    Name: RegulatoryDepartmentMSP
+    ID: RegulatoryDepartmentMSP
+    MSPDir: ./organizations/peerOrganizations/regulatorydepartment.example.com/msp
+    Policies:
+      Readers:
+        Type: Signature
+        Rule: "OR('RegulatoryDepartmentMSP.admin', 'RegulatoryDepartmentMSP.peer', 'RegulatoryDepartmentMSP.client')"
+      Writers:
+        Type: Signature
+        Rule: "OR('RegulatoryDepartmentMSP.admin', 'RegulatoryDepartmentMSP.client')"
+      Admins:
+        Type: Signature
+        Rule: "OR('RegulatoryDepartmentMSP.admin')"
+      Endorsement:
+        Type: Signature
+        Rule: "OR('RegulatoryDepartmentMSP.peer')"
+    AnchorPeers:
+      - Host: peer0.regulatorydepartment.example.com
+        Port: 7051
+
+  - &Producer
+    Name: ProducerMSP
+    ID: ProducerMSP
+    MSPDir: ./organizations/peerOrganizations/producer.example.com/msp
+    Policies:
+      Readers:
+        Type: Signature
+        Rule: "OR('ProducerMSP.admin', 'ProducerMSP.peer', 'ProducerMSP.client')"
+      Writers:
+        Type: Signature
+        Rule: "OR('ProducerMSP.admin', 'ProducerMSP.client')"
+      Admins:
+        Type: Signature
+        Rule: "OR('ProducerMSP.admin')"
+      Endorsement:
+        Type: Signature
+        Rule: "OR('ProducerMSP.peer')"
+    AnchorPeers:
+      - Host: peer0.producer.example.com
+        Port: 8051
+
+  - &Manufacturer
+    Name: ManufacturerMSP
+    ID: ManufacturerMSP
+    MSPDir: ./organizations/peerOrganizations/manufacturer.example.com/msp
+    Policies:
+      Readers:
+        Type: Signature
+        Rule: "OR('ManufacturerMSP.admin', 'ManufacturerMSP.peer', 'ManufacturerMSP.client')"
+      Writers:
+        Type: Signature
+        Rule: "OR('ManufacturerMSP.admin', 'ManufacturerMSP.client')"
+      Admins:
+        Type: Signature
+        Rule: "OR('ManufacturerMSP.admin')"
+      Endorsement:
+        Type: Signature
+        Rule: "OR('ManufacturerMSP.peer')"
+    AnchorPeers:
+      - Host: peer0.manufacturer.example.com
+        Port: 9051
+
+  - &Deliverer
+    Name: DelivererMSP
+    ID: DelivererMSP
+    MSPDir: ./organizations/peerOrganizations/deliverer.example.com/msp
+    Policies:
+      Readers:
+        Type: Signature
+        Rule: "OR('DelivererMSP.admin', 'DelivererMSP.peer', 'DelivererMSP.client')"
+      Writers:
+        Type: Signature
+        Rule: "OR('DelivererMSP.admin', 'DelivererMSP.client')"
+      Admins:
+        Type: Signature
+        Rule: "OR('DelivererMSP.admin')"
+      Endorsement:
+        Type: Signature
+        Rule: "OR('DelivererMSP.peer')"
+    AnchorPeers:
+      - Host: peer0.deliverer.example.com
+        Port: 10051
+
+  - &Retailer
+    Name: RetailerMSP
+    ID: RetailerMSP
+    MSPDir: ./organizations/peerOrganizations/retailer.example.com/msp
+    Policies:
+      Readers:
+        Type: Signature
+        Rule: "OR('RetailerMSP.admin', 'RetailerMSP.peer', 'RetailerMSP.client')"
+      Writers:
+        Type: Signature
+        Rule: "OR('RetailerMSP.admin', 'RetailerMSP.client')"
+      Admins:
+        Type: Signature
+        Rule: "OR('RetailerMSP.admin')"
+      Endorsement:
+        Type: Signature
+        Rule: "OR('RetailerMSP.peer')"
+    AnchorPeers:
+      - Host: peer0.retailer.example.com
+        Port: 11051
+
+# ============================================================
+Capabilities:
+  Channel: &ChannelCapabilities
+    V2_0: true
+  Orderer: &OrdererCapabilities
+    V2_0: true
+  Application: &ApplicationCapabilities
+    V2_5: true
+
+# ============================================================
+Application: &ApplicationDefaults
+  Organizations:
+  Policies:
+    Readers:
+      Type: ImplicitMeta
+      Rule: "ANY Readers"
+    Writers:
+      Type: ImplicitMeta
+      Rule: "ANY Writers"
+    Admins:
+      Type: ImplicitMeta
+      Rule: "MAJORITY Admins"
+    LifecycleEndorsement:
+      Type: ImplicitMeta
+      Rule: "MAJORITY Endorsement"
+    Endorsement:
+      Type: ImplicitMeta
+      Rule: "MAJORITY Endorsement"
+  Capabilities:
+    <<: *ApplicationCapabilities
+
+# ============================================================
+Orderer: &OrdererDefaults
+  OrdererType: etcdraft
+  Addresses:
+    - orderer.example.com:7050
+  BatchTimeout: 2s
+  BatchSize:
+    MaxMessageCount: 10
+    AbsoluteMaxBytes: 99 MB
+    PreferredMaxBytes: 512 KB
+  EtcdRaft:
+    Consenters:
+      - Host: orderer.example.com
+        Port: 7050
+        ClientTLSCert: ./organizations/ordererOrganizations/example.com/orderers/orderer.example.com/tls/server.crt
+        ServerTLSCert: ./organizations/ordererOrganizations/example.com/orderers/orderer.example.com/tls/server.crt
+  Organizations:
+  Policies:
+    Readers:
+      Type: ImplicitMeta
+      Rule: "ANY Readers"
+    Writers:
+      Type: ImplicitMeta
+      Rule: "ANY Writers"
+    Admins:
+      Type: ImplicitMeta
+      Rule: "MAJORITY Admins"
+    BlockValidation:
+      Type: ImplicitMeta
+      Rule: "ANY Writers"
+  Capabilities:
+    <<: *OrdererCapabilities
+
+# ============================================================
+Channel: &ChannelDefaults
+  Policies:
+    Readers:
+      Type: ImplicitMeta
+      Rule: "ANY Readers"
+    Writers:
+      Type: ImplicitMeta
+      Rule: "ANY Writers"
+    Admins:
+      Type: ImplicitMeta
+      Rule: "MAJORITY Admins"
+  Capabilities:
+    <<: *ChannelCapabilities
+
+# ============================================================
+
+Profiles:
+
+  TraceChannel:
+    <<: *ChannelDefaults
+
+    Orderer:
+      <<: *OrdererDefaults
+      Organizations:
+        - *OrdererOrg
+      Capabilities:
+        <<: *OrdererCapabilities
+
+    Application:
+      <<: *ApplicationDefaults
+      Organizations:
+        - *RegulatoryDepartment
+        - *Producer
+        - *Manufacturer
+        - *Deliverer
+        - *Retailer
+      Capabilities:
+        <<: *ApplicationCapabilities
